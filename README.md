@@ -1,140 +1,173 @@
-# SurplusLink AI backend — Phase 1
+# SurplusLink AI — complete demo backend
 
-Dockerized foundation for a B2B surplus inventory marketplace in Pakistan. Phase 1 contains infrastructure only: no authentication, marketplace tables, AI calls, payments, or background services.
+A Dockerized FastAPI/PostgreSQL modular monolith for a two-way packaged bakery surplus marketplace in Pakistan. It supports fictional organization identities, confirmed inventory, requirements, reviewable hosted AI extraction, deterministic matching, offers, inventory reservation, payment simulation, collection and simulated fee reporting.
 
-## Quick start (PowerShell)
+Hosted AI now uses GroqCloud with GROQ_API_KEY. See [Groq migration verification](docs/GROQ_MIGRATION.md) for actual live test results and model-access errors.
 
-Prerequisites: Git and running Docker Desktop with Linux containers and Compose. Local Python, pip, PostgreSQL, and uv are unnecessary.
+## Start and inspect
+
+Prerequisites: Docker Desktop (Linux containers), Compose and Git. No host Python, pip, PostgreSQL or model download is needed. Run from the repository directory:
 
 ```powershell
+# New checkout only; preserve an existing .env and its password.
 Copy-Item .env.example .env
-# Edit .env and replace POSTGRES_PASSWORD with a private development password.
+# Edit POSTGRES_PASSWORD; optionally configure GROQ_API_KEY and a verified AI_MODEL.
 docker compose config --quiet
 docker compose up -d --build
+docker compose exec api alembic upgrade head
+docker compose exec api python -m app.seed
 docker compose ps
 docker compose logs --tail=100 api
-Invoke-RestMethod http://localhost:8000/health
-Invoke-RestMethod http://localhost:8000/ready
-Invoke-RestMethod http://localhost:8000/api/v1/ping
 docker compose exec api pytest -q
+```
+
+Swagger: [localhost:8000/docs](http://localhost:8000/docs). API base: `http://localhost:8000/api/v1`. Liveness: `/health` (no database access). Readiness: `/ready` (`SELECT 1`). API source is bind-mounted and Uvicorn reloads Python changes; dependency/Dockerfile changes require rebuilding. Environment changes require recreating the API container.
+
+Beekeeper PostgreSQL connection: host `127.0.0.1`, port **15432**, database/user `surpluslink`, password from `.env`, SSL off locally. Refresh `public` → Tables. API containers connect through `db:5432`, not the desktop port. Both published ports bind to loopback only.
+
+```powershell
 docker compose exec api alembic current
-docker compose exec api alembic upgrade head
+docker compose exec api alembic check
 docker compose down
 ```
 
-If `.env` already exists, preserve it instead of copying over it. This implementation session created an ignored `.env` with a random development password. Never commit it. View Swagger at [localhost:8000/docs](http://localhost:8000/docs) and the schema at [localhost:8000/openapi.json](http://localhost:8000/openapi.json).
+`down` retains named volumes. **`down -v` deletes records; do not use it to repair passwords or migrations.** Changing POSTGRES_PASSWORD in `.env` does not change an initialized PostgreSQL role password. To change that password, run `docker compose exec db psql -U surpluslink -d surpluslink`, use `\password surpluslink`, then `\q`, update `.env` to match, and run `docker compose up -d`.
 
-`docker compose down` retains the named database volume. **`docker compose down -v` deletes database records** and should not be used casually.
-
-## Architecture and important files
-
-A modular monolith is one application and one deployment, with clear internal boundaries. The intended request flow is route → service → repository → SQLAlchemy session → PostgreSQL. Health routes are deliberately small and use no business services.
-
-```text
-app/
-  main.py                  Application factory, lifecycle, CORS, health/readiness
-  api/dependencies.py      Request-scoped database session dependency
-  api/v1/router.py         Versioned API routes; currently ping only
-  core/config.py           Typed environment settings and safe URL construction
-  core/exceptions.py       Central API error envelope
-  core/logging.py          Standard logging with credential-safe traceback formatting
-  db/base.py               SQLAlchemy declarative metadata
-  db/session.py            Engine and session factory
-  schemas/health.py        Pydantic response contracts
-  models/                  Future table mappings; currently empty
-  repositories/            Future persistence operations; currently empty
-  services/                Future business rules and transactions; currently empty
-alembic/
-  env.py                   Settings-driven online/offline migration runner
-  script.py.mako           Revision template
-  versions/                No business revisions yet
-tests/                     HTTPX-backed TestClient endpoint tests
-Dockerfile                 Reproducible development image
-compose.yml                API and PostgreSQL services, network, volume
-pyproject.toml             Dependency constraints and pytest configuration
-uv.lock                    Exact resolved versions and package hashes
-```
-
-Stack: Python 3.12 slim, FastAPI, Uvicorn, SQLAlchemy 2, Psycopg 3 binary wheels, PostgreSQL 17, Pydantic 2, pydantic-settings, Alembic, pytest and HTTPX. uv 0.12.17 is pinned in Docker. `uv.lock` pins the complete Python dependency graph; base image tags receive upstream patches and are not digest pinned. No system compiler or extra service is installed. The connection pool allows two persistent connections and one overflow connection per API process.
-
-## Settings and frontend connection
-
-Compose reads `.env` for PostgreSQL variables and passes it to the API container. Settings are validated when the factory starts. Keep `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` consistent; the API composes its URL using `URL.create`, so passwords containing URL punctuation are supported without manual encoding. Use single-quoted values in `.env` if your password contains `$` to avoid Compose interpolation.
-
-An optional `DATABASE_URL` overrides the individual settings. It must use `postgresql+psycopg://` and URL-encoded credentials matching the database. Leave it unset for local development. `POSTGRES_HOST` defaults to `db` and `POSTGRES_PORT` to 5432. `.env.example` documents application name, development environment, API prefix, logging and CORS settings. `DEBUG=true` enables safe traceback locations in application logs; HTTP debug pages remain disabled.
-
-Set comma-separated `CORS_ORIGINS` to exact frontend origins, for example `http://localhost:5173,http://localhost:3000`. React running in your browser calls `http://localhost:8000/api/v1/ping`. `db` is a Docker-only hostname, not the frontend API address. Only API port 8000 is published, bound to loopback; PostgreSQL has no host port.
-
-`AI_PROVIDER`, `AI_BASE_URL`, `AI_MODEL`, `HF_TOKEN`, and `AI_TIMEOUT_SECONDS` are optional typed settings for later phases. No token is required and no provider is called.
-
-## How startup and Docker work
-
-An **image** is the packaged filesystem and startup instructions, like a reusable application build. A **container** is a running instance of that image with isolated processes and networking.
-
-The Dockerfile describes building the API image: copy pinned uv, install the lockfile into `/opt/venv`, then copy source. Copying dependency files first lets Docker reuse installation layers when only application code changes. Compose describes running the API together with PostgreSQL, including configuration, networking, health checks, ports, and storage.
-
-On startup PostgreSQL initializes an empty data volume once. Compose waits for `pg_isready`, then Uvicorn calls `create_app()`. The factory validates settings, configures logging, creates a lazy engine and session factory, and registers routes and exception handlers. Startup logs an event; it does not run queries, migrations, or `create_all()`. Shutdown disposes the engine pool.
-
-The API connects to `db:5432` through the Compose network. The named `postgres_data` volume lives independently of containers, so replacing a container preserves records. Changing `POSTGRES_PASSWORD` after initialization does not change the password stored in PostgreSQL; change the database role password deliberately and then update `.env`.
-
-Compose bind-mounts `app`, tests and Alembic sources. Uvicorn reloads when application Python files change. Dependencies stay outside those mounts in `/opt/venv`. Changing dependencies requires updating the lockfile and rebuilding; changing `.env` requires recreating the API container.
-
-## Requests, dependency injection, and errors
-
-Uvicorn accepts HTTP, FastAPI matches the URL and method, resolves dependencies, runs the handler, and validates its response model. An `APIRouter` groups routes, similar to a NestJS controller; `include_router(..., prefix="/api/v1")` mounts that group.
-
-`Depends(get_db)` asks FastAPI to execute a callable for a request. The dependency yields a session and closes it after the handler. NestJS usually injects constructor dependencies from a provider container; FastAPI resolves callable dependencies in a request graph and supports teardown through `yield`. Tests replace dependencies using `app.dependency_overrides`.
-
-Synchronous handlers run in FastAPI's worker thread pool, allowing ordinary synchronous database code without blocking the event loop.
-
-| Endpoint | Meaning | Database required |
-|---|---|---|
-| `/health` | Process can respond | No |
-| `/ready` | `SELECT 1` succeeds with configured credentials | Yes |
-| `/api/v1/ping` | Versioned router is mounted | No |
-
-Database failures return HTTP 503 with `{"error":{"code":"DATABASE_UNAVAILABLE","message":"Database connection is currently unavailable."}}`. Unknown routes return an error envelope with 404; validation failures return 422 without echoing submitted data; unexpected failures return a generic 500. Logs record failure events and exception types without SQL parameters, payloads, URLs or exception messages. Development traceback locations remain available. Uvicorn also provides request access logs; avoid putting secrets in URL query strings.
-
-## Sessions and transactions: from Prisma to SQLAlchemy
-
-An **engine** owns database connectivity and a pool, roughly the connection management part of a Prisma client. Creating it does not connect. A **Session** is a short-lived unit of work and identity map: it tracks loaded objects and pending changes for one request.
-
-The first query normally begins a transaction automatically. Services decide when to commit. Closing a session rolls back unfinished work; the dependency never blindly commits. Unlike passing a Prisma transaction client into a callback, SQLAlchemy commonly passes the request session into repository methods and uses an explicit transaction block in the service:
-
-```python
-# Future service example only; no business models exist in Phase 1.
-with session.begin():
-    repository.create_listing(session, data)
-    repository.record_inventory_change(session, data)
-# Successful block commits both; failure rolls both back.
-```
-
-Start transaction blocks before other operations on that session. Alternatively call `session.commit()` deliberately and `session.rollback()` on failure. Repositories should not commit independent pieces of a service transaction.
-
-## Migrations: from Flyway to Alembic
+## Complete HTTP demonstration
 
 ```powershell
-docker compose exec api alembic current
-docker compose exec api alembic upgrade head
-# Phase 2 only, after approving the schema and importing models in app/models/__init__.py:
-docker compose exec api alembic revision --autogenerate -m "create marketplace schema"
+docker compose exec api python -m app.demo
 ```
 
-Both Flyway and Alembic track applied schema versions. Flyway commonly applies ordered SQL files; Alembic follows revision IDs linked by `down_revision`, usually executing Python `upgrade()`/`downgrade()` functions. Alembic autogenerate compares registered SQLAlchemy metadata to the live schema and drafts operations. Review generated revisions, especially renames, constraints and data changes; it cannot infer business intent.
+This creates fresh explicitly fictional records each run for Gulberg Packaged Foods and Johar Town Mini Mart. It creates a complete draft, publishes it, saves a buyer requirement, checks both matching directions, submits Rs. 120/unit, accepts, reserves 150 of 200 packs, creates a pending mock payment, simulates success, unlocks pickup details, confirms collection, and verifies dashboard revenue.
 
-There are no marketplace tables or placeholder revisions. `alembic current` has no revision to print in Phase 1. `upgrade head` can create Alembic's own version tracking table but no business schema. The first real migration belongs in Phase 2. Migrations are explicit commands and never run on API startup.
+Expected result: COMPLETED; 150 sold, 0 reserved, 50 available; Rs. 18,360 buyer total, Rs. 17,640 seller net and **Rs. 720 simulated platform gross fees**. Repeated checkout reuses its payment. The default demo uses explicit structured fixture data and prints that AI was not invoked.
 
-## Tests and verification
+For the real AI path, first configure a working HF token/model, then run:
+
+```powershell
+docker compose up -d --force-recreate api
+docker compose exec api python -m app.ai_smoke
+docker compose exec api python -m app.demo --live-ai --confirm-demo-data
+```
+
+The live demo sends two real extraction requests and verifies expected fictional values before persistence. `--confirm-demo-data` explicitly confirms this known fixture scenario. Missing/invalid AI data stops the live demo; it never silently switches to manual or mocked extraction. Real-world UI users must review extracted values themselves before POST /lots or POST /requirements.
+
+## Development identity and authorization
+
+JWT/login is outside this project scope. Identity selection works only with **APP_ENV=development and DEMO_MODE=true**, and only for the five fictional seeded users/organizations. It is not production authentication and must never be used for real private supplier data.
+
+```powershell
+curl.exe http://localhost:8000/api/v1/demo/identities
+```
+
+Pick an identity's `user_id` and `organization_id`. Send both headers for private operations:
+
+```text
+X-Demo-User-ID: selected user_id
+X-Demo-Org-ID: selected organization_id
+```
+
+The backend checks user, organization and active membership on every request. OWNER and MANAGER can mutate; STAFF can read organization-scoped details. The acting organization always comes from membership context, never a body field. Production or DEMO_MODE=false disables demo identity selection, mock payment mutation and the gated marketplace routes. Safe organization summaries remain public.
+
+`/organizations/me` and `/lots/mine` are private; public DTOs exclude contacts, reserve prices, original seller text and pickup addresses. Buyer pickup access uses `/deals/{id}/pickup-details`, unlocked only for that deal's parties after successful simulated payment. Seller collection confirmation requires its OWNER/MANAGER role. The first seeded seller OWNER is the explicitly labelled platform-demo administrator; only that identity sees platform-wide simulated aggregates. Other identities see their own organization metrics.
+
+## API and frontend integration
+
+See [frontend integration guide](docs/FRONTEND.md) and the exported [OpenAPI contract](docs/openapi.json). Existing React sources are in a separate repository and were not available here; this schema is the authoritative contract for integration. CORS allows `http://localhost:5173` by default.
+
+| Methods | Paths under `/api/v1` |
+|---|---|
+| GET | `/organizations`, `/organizations/{id}`, `/organizations/me` |
+| GET | `/demo/identities`, `/demo/organizations`, `/demo/metadata` |
+| POST, GET | `/lots` |
+| GET | `/lots/{id}`, `/lots/mine` |
+| PATCH | `/lots/{id}` |
+| POST | `/lots/{id}/publish`, `/lots/{id}/pause` |
+| POST, GET | `/requirements` |
+| GET, PATCH | `/requirements/{id}` |
+| POST | `/requirements/{id}/pause` |
+| POST | `/ai/parse-lot`, `/ai/parse-requirement` |
+| GET | `/requirements/{id}/matches`, `/lots/{id}/matching-buyers` (owner organization) |
+| POST | `/lots/{id}/offers` |
+| GET | `/offers`, `/offers/{id}` |
+| POST | `/offers/{id}/respond`, `/offers/{id}/withdraw` |
+| GET | `/deals`, `/deals/{id}`, `/deals/{id}/payment`, `/deals/{id}/pickup-details` |
+| POST | `/deals/{id}/checkout`, `/deals/{id}/cancel`, `/deals/{id}/complete` |
+| POST | `/payments/mock/{id}/succeed`, `/payments/mock/{id}/fail` |
+| GET | `/dashboard/summary` |
+
+Lists of lots, requirements, organizations, offers and deals support `limit` (1–100) and `offset`. Inventory creation requires all table-required fields, even for DRAFT. DRAFT can have unconfirmed flags; publication requires both confirmations. The compatible create default is ACTIVE, so clients wanting review-before-publication must explicitly send `status: "DRAFT"`. Editing stock with reservations/sales is blocked; use status actions to pause. Requirements with accepted deals cannot be edited. There are no destructive CRUD delete routes.
+
+Allowed categories: `biscuits`, `bread`, `cakes`, `pastries`, `rusks`, `buns`. Units: `pack`, `carton`, `tray`, `piece`. Normalize common aliases/case; matching then uses exact category/unit/city. Storage: ambient/chilled/frozen. Only sealed packaging is accepted. Expiry is a date evaluated in Asia/Karachi; expiry-day stock is conservatively excluded.
+
+## AI behavior and configuration
+
+```env
+AI_PROVIDER=groq
+AI_BASE_URL=https://api.groq.com/openai/v1
+AI_MODEL=llama-3.1-8b-instant
+GROQ_API_KEY=your_backend_secret
+AI_TIMEOUT_SECONDS=20
+```
+
+Never leave AI_MODEL as a placeholder. Availability depends on the router, provider and account; a catalog entry alone does not prove account access. The Groq key needs access to the configured model and available quota/credits. Keep it server-side and out of Git. No OpenAI-hosted model is implied by using its compatible Python SDK. SDK behavior follows [official OpenAI documentation](https://developers.openai.com/api/reference/python/resources/chat/subresources/completions/methods/create), with [Groq OpenAI compatibility](https://console.groq.com/docs/openai).
+
+`description` is the primary parse input; the older `text` alias remains accepted. Both parse routes require demo identity headers. Example request:
+
+```json
+{
+  "description": "200 sealed biscuit packs in Gulberg, Lahore, asking Rs. 140 per pack, minimum Rs. 110, expiry in 45 days.",
+  "reference_date": "2026-10-18",
+  "timezone": "Asia/Karachi"
+}
+```
+
+Use the actual reference date in your UI. Relative expressions remain in `relative_expiry_expression` and `remaining_shelf_life_days`; an absolute date is derived only when both reference fields are valid and supplied. Output retains `data.quantity_total` for seller quantities to match the lot API. Money is extracted as decimal rupees and converted to integer paisa in Python. Unknown fields become null; ambiguous units become null. Exact supporting source quotes are required, but this is not proof of semantic correctness. Users must confirm safety/resale flags; AI cannot set them.
+
+Responses include `provider`, `model`, `mode` (`live`/`mock`), `simulated`, `missing_fields`, `needs_review: true` and `persisted: false`. Review is always required, including for otherwise complete output. No LLM call persists or publishes inventory. Invalid output returns 502, provider timeout 504, and unavailable configuration/access/model/quota 503. Manual structured input remains usable when AI fails.
+
+Explicit `AI_PROVIDER=mock` enables deterministic known test fixtures in development. It is always labelled mock/simulated, is not general-purpose extraction, and is never selected as a fallback. The optional live smoke command reports failure or missing credentials honestly. See [current completion report](PHASE3_8_REPORT.md) for actual live results.
+
+## Inventory, transactions and revenue
+
+```text
+available = quantity_total - quantity_reserved - quantity_sold
+```
+
+All quantities are whole units. Submitting offers reserves nothing. Acceptance starts in the request transaction, locks the lot then offer, checks current expiry/stock/requirements and confidential seller reserve policy, reserves stock, snapshots financial totals, records an event and commits atomically. One offer can create one deal; the unique constraint and idempotent acceptance prevent duplicates. Row locking serializes competing acceptance and inventory transitions.
+
+Checkout creates/reuses a PENDING MOCK payment. Explicit success marks it SUCCEEDED and the deal PAID; failure marks only that attempt FAILED and allows another checkout attempt. Duplicate callbacks are idempotent and do not duplicate events. A unique partial index prevents two successful payments per deal. Payment does not confirm collection.
+
+Only the seller OWNER/MANAGER can complete a PAID deal. Completion moves reserved → sold and appends a collection event. Unpaid cancellation releases reservations and fails pending attempts. Paid cancellation is rejected because refunds are outside scope. Completed deals cannot be cancelled or completed twice. Payment is due one hour after deal creation, subject also to product expiry/pickup deadline. Run explicit unpaid cleanup when needed:
+
+```powershell
+docker compose exec api python -m app.services.deal_service
+```
+
+No queue or automatic background expiration is implied. Fee rates are 200 basis points per side. `fee = (subtotal_minor * 200 + 5000) // 10000` rounds nonnegative fees half up to a paisa; no floating point is used. SQL checks and a trigger protect monetary snapshots. Dashboard revenue counts only COMPLETED deals with successful MOCK payments, never merely accepted or paid transactions. All values are simulated; no real payment, transfer, escrow or earnings exist.
+
+## Architecture and database ownership
+
+The original factory, settings, session dependency and Docker setup are retained. Routes validate HTTP contracts; services own rules and transaction commits; named SQLAlchemy models own table mappings; Pydantic schemas control public/private output. Query helpers live in the catalog/dashboard services where reuse is useful; the repository package is available without adding unnecessary wrappers.
+
+Key modules: `api/dependencies.py`, `core/security.py`, `services/catalog.py`, `services/marketplace.py`, `services/offer_service.py`, `services/deal_service.py`, `services/payment_service.py`, `services/dashboard_service.py`, `services/ai.py`, `services/ai_provider.py`, `services/ai_prompts.py`. API modules group organizations, existing marketplace operations, AI, offers, deals, payments and dashboard.
+
+An SQLAlchemy engine owns pooled connections (two persistent plus one overflow). A request Session is a unit of work similar to passing a Prisma transaction client; querying starts a transaction, services commit it, and dependency teardown rolls unfinished work back. Repositories must not independently commit a multi-operation service transaction. NestJS typically injects constructor providers; FastAPI resolves request callables with Depends and handles yield cleanup.
+
+The existing Alembic revision `4191df3243ce` remains unchanged in this extension. Existing columns and statuses support these features; no duplicate tables or unnecessary revision was created. Alembic tracks revision chains and can draft model/schema diffs; unlike typical Flyway SQL version files, generated Python migration operations still need review. Never use ORM create_all at startup. See [field definitions and Mermaid ER diagram](docs/DATABASE.md).
+
+## Tests and maintenance
 
 ```powershell
 docker compose exec api pytest -q
 docker compose exec api alembic check
-docker compose logs --tail=100 db api
+docker compose exec api python -m app.testing
 ```
 
-The fast tests use HTTPX through FastAPI's TestClient, override database sessions, assert `SELECT 1`, simulate credential-bearing connection errors, and exercise routing and safe error handling. They do not need a live database. Real connectivity is separately verified through `/ready` against the running PostgreSQL container. `alembic check` verifies that metadata and schema have no pending differences without creating a revision.
+Tests create/migrate `surpluslink_test` rather than resetting development data. Most use an outer rollback transaction and savepoints; real concurrency tests use independent connections and uniquely identified committed test records in that separate database. They cover membership/roles, CRUD/privacy, publication, extraction validation/errors, deterministic matches, fees, acceptance races, payment races/retries, cancellation, collection and simulated reporting. The existing Starlette HTTPX TestClient deprecation warning is recorded rather than hidden.
 
-To update dependencies using Docker only:
+Dependency updates stay inside Docker and update the real lockfile:
 
 ```powershell
 docker build --target tooling -t surpluslink-tooling .
@@ -143,19 +176,8 @@ docker compose up -d --build
 docker compose exec api pytest -q
 ```
 
-Review and commit both `pyproject.toml` and `uv.lock` after dependency changes. Never replace the lockfile with a hand-written list.
+Dockerfile builds a Python 3.12 slim image with pinned uv, installing uv.lock before source for layer caching. Compose runs that image and PostgreSQL 17 on a private network, waits for the database healthcheck, and stores database records in a named volume. An image is the reusable package; a container is its running process/filesystem instance. Base tags remain patch-updatable rather than digest pinned.
 
-## Troubleshooting
+Troubleshoot with `docker compose ps` and `docker compose logs --tail=100 db api`. If `/ready` fails, check role credentials and host `db`; pg_isready alone does not prove authentication. If AI returns model errors, replace placeholder model IDs and check the actual account/provider. If port 15432 is occupied, change only its host side and update Beekeeper. No local Python, PostgreSQL, Redis, Ollama or queues are required.
 
-- Docker engine unavailable or permission denied: start Docker Desktop, select Linux containers, and ensure your account can access Docker. Codex may need approval to use the Docker named pipe.
-- Port 8000 occupied: stop the conflicting process or change only the host side of the Compose port binding; update the frontend API URL.
-- Database unhealthy: inspect `docker compose logs --tail=100 db` and confirm credentials against the initialized volume.
-- API starts but `/ready` returns 503: inspect API and database logs, hostname and credentials. `pg_isready` alone does not prove API authentication works.
-- Source changes do not reload on Windows: check bind mounts; if necessary set `WATCHFILES_FORCE_POLLING=true` and install Uvicorn's standard extras deliberately. The default minimal Uvicorn reloader polls Python files without extra dependencies.
-- Low memory: run this single API process and database only; no AI downloads are involved. Adjust Docker Desktop's resource allocation to your machine and stop unrelated containers.
-
-## Future phases and ownership
-
-Routes handle HTTP contracts; services own business rules and transaction boundaries; repositories own persistence queries; models map tables; schemas validate API data. This keeps HTTP details out of business rules and avoids making database models the public API contract.
-
-Next, approve organizations, users, inventory and requirement relationships before adding Phase 2 models and reviewed migrations. As features grow, group each marketplace domain into modules within this same application. Later an AI provider adapter can implement a service interface and use the optional settings, so ordinary marketplace APIs do not depend on provider-specific HTTP details. Authentication, listings, matching, offers, deals, checkout and AI remain outside Phase 1.
+Production authentication, verification/food policy workflows, refunds, counteroffer audit revisions, operational deployment and real payments remain outside this demo. Do not use demo identities with real customer data.

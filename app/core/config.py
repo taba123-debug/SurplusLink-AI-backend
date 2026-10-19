@@ -21,11 +21,12 @@ class Settings(BaseSettings):
     database_url: SecretStr | None = None
     cors_origins: str = "http://localhost:5173"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-    ai_provider: str | None = None
-    ai_base_url: str | None = None
-    ai_model: str | None = None
-    hf_token: SecretStr | None = None
-    ai_timeout_seconds: float = 30
+    ai_provider: Literal["groq", "mock"] = "groq"
+    ai_base_url: str = "https://api.groq.com/openai/v1"
+    ai_model: str = "llama-3.1-8b-instant"
+    groq_api_key: SecretStr | None = None
+    ai_timeout_seconds: float = 20
+    demo_mode: bool = True
 
     @field_validator("api_v1_prefix")
     @classmethod
